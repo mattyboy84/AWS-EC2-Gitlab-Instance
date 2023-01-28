@@ -1,0 +1,338 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  vpcCIDR:
+    Type: String
+    Description: cidr block for the vpc (and subnet)
+    Default: 10.5.0.0/16
+  gitlabRootPassword:
+    Type: String
+    Default: Password123!
+# ROUTE 53 HOSTING CONFIG ############
+  domainName:
+    Type: String
+    Description: name of domain registered in route 53.
+  domainCertArn:
+    Type: String
+    Description: certificate of domain registered in route 53. must cover the given domain name/ sub domain name
+  
+Resources:
+  gitlabInstanceRole: #This determines what can be done inside the EC2 instance
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-gitlabInstanceRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ssm.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: !Sub "${AWS::StackName}-role-policy"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: "ssm:SendCommand"
+                Resource: "*"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+        - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  
+  instanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      InstanceProfileName: !Sub "${AWS::StackName}-profile"
+      Path: /
+      Roles: 
+        - !Ref gitlabInstanceRole
+  
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-InternetGateway"
+  
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref EC2vpc
+  
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref EC2vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-PublicRouteTable"
+  
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTable
+    DependsOn:
+      - VPCGatewayAttachment
+  
+  subnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref subnetB
+  
+  subnetCRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref subnetC
+  
+  EC2vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref vpcCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-VPC"
+  
+  subnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      #CidrBlock: !GetAtt EC2vpc.CidrBlock # 10.3.0.0/16
+      CidrBlock: !Select [1, !Cidr [ !GetAtt EC2vpc.CidrBlock, 3, 8 ]] # 10.3.2.0/24
+      AvailabilityZone: !Select [1, Fn::GetAZs: !Ref "AWS::Region"]
+      VpcId: !Ref EC2vpc
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-subnetB"
+  
+  subnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      #CidrBlock: !GetAtt EC2vpc.CidrBlock # 10.3.0.0/16
+      CidrBlock: !Select [2, !Cidr [ !GetAtt EC2vpc.CidrBlock, 3, 8 ]] # 10.3.2.0/24
+      AvailabilityZone: !Select [2, Fn::GetAZs: !Ref "AWS::Region"]
+      VpcId: !Ref EC2vpc
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-subnetC"
+  
+  instanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupDescription: !Sub "${AWS::StackName}-SecurityGroup description"
+      GroupName: !Sub "${AWS::StackName}-SecurityGroup"
+      VpcId: !Ref EC2vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp #SSH
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - FromPort: 80 #HTTP
+          ToPort: 80
+          IpProtocol: tcp
+          CidrIp: 0.0.0.0/0
+        - FromPort: 443 #HTTPS
+          ToPort: 443
+          IpProtocol: tcp
+          CidrIp: 0.0.0.0/0
+        - FromPort: 9418 #gitlab
+          ToPort: 9418
+          IpProtocol: tcp
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-instanceSecurityGroup"
+  
+  demoKey:
+    Type: 'AWS::EC2::KeyPair'
+    Properties:
+      KeyName: !Sub "${AWS::StackName}-keyPair"
+      KeyType: rsa
+      #PublicKeyMaterial:
+  
+  placementGroup:
+    Type: AWS::EC2::PlacementGroup
+    Properties: 
+      SpreadLevel: rack
+      Strategy: spread
+  
+  gitlabInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      LaunchTemplate:
+        LaunchTemplateId: !Ref instanceTemplate
+        Version: !GetAtt instanceTemplate.LatestVersionNumber
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}"
+  
+  instanceTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "${AWS::StackName}-instanceTemplate"
+      VersionDescription: "1.0.0"
+      LaunchTemplateData:
+        ImageId: ami-084e8c05825742534
+        InstanceType: t2.medium
+        CreditSpecification:
+          CpuCredits: standard
+        DisableApiTermination: false
+        EbsOptimized: false
+        InstanceInitiatedShutdownBehavior: stop # what to do when told to 'shutdown'
+        Monitoring:
+          Enabled: true
+        KeyName: !Ref demoKey
+        IamInstanceProfile:
+          Arn: !GetAtt instanceProfile.Arn
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            DeleteOnTermination: true
+            InterfaceType: interface
+            SubnetId: !Ref subnetC
+            Groups:
+              - !Ref instanceSecurityGroup
+            AssociatePublicIpAddress: true
+        Placement:
+          GroupName: !Ref placementGroup
+          Tenancy: default
+        MetadataOptions:
+          HttpEndpoint: enabled # curl http://169.254.169.254/latest/meta-data/
+          InstanceMetadataTags: enabled
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+  
+            sudo yum -y update
+  
+            curl https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm -o amazon-cloudwatch-agent.rpm
+            sudo yum install -y ./amazon-cloudwatch-agent.rpm
+            
+            # Create a configuration file for the agent
+            sudo tee /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<EOF
+            {
+              "region": "${AWS::Region}",
+              "namespace": "{instance_id}",
+              "logs": {
+                "logs_collected": {
+                  "files": {
+                    "collect_list": [
+                      {
+                        "file_path": "/var/log/messages",
+                        "log_group_name": "/aws/ec2/${AWS::StackName}-terminal",
+                        "log_stream_name": "{instance_id}"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            EOF
+            # Start and enable the agent
+            sudo systemctl start amazon-cloudwatch-agent
+            sudo systemctl enable amazon-cloudwatch-agent
+            ########################################################################
+  
+            cd /
+            sudo su
+  
+            # WITHOUT DOMAIN
+            # sudo curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.rpm.sh | sudo bash && sudo GITLAB_ROOT_PASSWORD="${gitlabRootPassword}" yum -y install gitlab-ce && sudo gitlab-ctl reconfigure && echo $(sudo cat /etc/gitlab/initial_root_password) >> /var/log/messages
+  
+            # WITH DOMAIN
+            sudo curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.rpm.sh | sudo bash && sudo EXTERNAL_URL="https://${domainName}" GITLAB_ROOT_PASSWORD="${gitlabRootPassword}" yum -y install gitlab-ce && sudo gitlab-ctl reconfigure && echo $(sudo cat /etc/gitlab/initial_root_password) >> /var/log/messages
+    DependsOn:
+      - instanceTerminalLogs
+  
+  instanceTerminalLogs: # === This log name is hardcoded into the ec2 template UserData FYI ===
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['', [/aws/ec2/, !Sub "${AWS::StackName}-terminal"]]
+  
+  loadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties: 
+      Name: !Sub "${AWS::StackName}-LB"
+      IpAddressType: ipv4
+      Type: application
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref instanceSecurityGroup # create own group with only http, https & git ports
+      Subnets: # 2 subnets needed
+        - !Ref subnetC
+        - !Ref subnetB
+  
+  HTTPlistener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      DefaultActions: 
+        - Type: forward
+          TargetGroupArn: !Ref HTTPtargetGroup
+      LoadBalancerArn: !Ref loadBalancer
+  
+  HTTPtargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties: 
+      Name: !Sub "${AWS::StackName}-LB-HTTP-TG"
+      TargetType: instance
+      IpAddressType: ipv4
+      Port: 80
+      Protocol: HTTP
+      ProtocolVersion: HTTP1
+      VpcId: !Ref EC2vpc
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: "80"
+      Targets:
+        - Id: !Ref gitlabInstance
+  
+##########################
+  #ROUTE 53 HOSTING RESOURCES
+  
+  HTTPSlistener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Port: 443
+      Protocol: HTTPS
+      Certificates: # overrides Gitlab's self-signed cert
+        - CertificateArn: !Ref domainCertArn
+      DefaultActions: 
+        - Type: forward
+          TargetGroupArn: !Ref HTTPStargetGroup
+      LoadBalancerArn: !Ref loadBalancer
+  
+  HTTPStargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties: 
+      Name: !Sub "${AWS::StackName}-LB-HTTPS-TG"
+      TargetType: instance
+      IpAddressType: ipv4
+      Port: 443
+      Protocol: HTTPS
+      ProtocolVersion: HTTP1
+      VpcId: !Ref EC2vpc
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTPS
+      HealthCheckPort: "443"
+      Targets:
+        - Id: !Ref gitlabInstance
+  
+Outputs:
+  loadBalancerDNSname:
+    Value: !GetAtt loadBalancer.DNSName
+  # ROUTE 53 HOSTING CONFIG ############
+  gitlabUrl:
+    Value: !Sub "https://${domainName}"
