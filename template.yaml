@@ -248,10 +248,10 @@ Resources:
             sudo su
   
             # WITHOUT DOMAIN
-            # sudo curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.rpm.sh | sudo bash && sudo GITLAB_ROOT_PASSWORD="${gitlabRootPassword}" yum -y install gitlab-ce && sudo gitlab-ctl reconfigure && echo $(sudo cat /etc/gitlab/initial_root_password) >> /var/log/messages
+            # sudo curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.rpm.sh | sudo bash && sudo GITLAB_ROOT_PASSWORD="${gitlabRootPassword}" yum -y install gitlab-ce && sudo gitlab-ctl reconfigure
   
             # WITH DOMAIN
-            sudo curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.rpm.sh | sudo bash && sudo EXTERNAL_URL="https://${domainName}" GITLAB_ROOT_PASSWORD="${gitlabRootPassword}" yum -y install gitlab-ce && sudo gitlab-ctl reconfigure && echo $(sudo cat /etc/gitlab/initial_root_password) >> /var/log/messages
+            sudo curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.rpm.sh | sudo bash && sudo EXTERNAL_URL="https://${domainName}" GITLAB_ROOT_PASSWORD="${gitlabRootPassword}" yum -y install gitlab-ce && sudo gitlab-ctl reconfigure
     DependsOn:
       - instanceTerminalLogs
   
