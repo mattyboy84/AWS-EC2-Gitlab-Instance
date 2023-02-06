@@ -16,7 +16,7 @@ Parameters:
   domainCertArn:
     Type: String
     Description: certificate of domain registered in route 53. must cover the given domain name/ sub domain name
-  
+
 Resources:
   gitlabInstanceRole: #This determines what can be done inside the EC2 instance
     Type: AWS::IAM::Role
@@ -28,7 +28,9 @@ Resources:
           - Effect: Allow
             Principal:
               Service:
+                - ec2.amazonaws.com
                 - ssm.amazonaws.com
+                - events.amazonaws.com
             Action:
               - sts:AssumeRole
       Path: "/"
@@ -40,9 +42,47 @@ Resources:
               - Effect: Allow
                 Action: "ssm:SendCommand"
                 Resource: "*"
+              - Effect: Allow
+                Action: "s3:PutObject"
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - "events:PutTargets"
+                  - "events:DescribeRule"
+                  - "events:PutRule"
+                Resource: "*"
       ManagedPolicyArns:
         - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
         - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  
+  bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${AWS::StackName}-backups"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      NotificationConfiguration: # send events to eventbridge
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      #LifecycleConfiguration:
+      #  Rules:
+      #    - Id: rule0
+      #      Status: Enabled
+      #      #Prefix: /
+      #      ExpirationInDays: 1
+      #      NoncurrentVersionExpiration:
+      #        NoncurrentDays: 1
+    DeletionPolicy: Delete
   
   instanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -64,6 +104,49 @@ Resources:
     Properties:
       InternetGatewayId: !Ref InternetGateway
       VpcId: !Ref EC2vpc
+  
+  networkAcl:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref EC2vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-networkAcl"
+  
+  ACLInboundRule:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref networkAcl
+      RuleNumber: 100
+      Egress: false # outgoing
+      Protocol: -1 # according to this list https://en.wikipedia.org/wiki/List_of_IP_protocol_numbers
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+      #PortRange:
+      #  From: 22
+      #  To: 22
+
+  ACLOutboundRule:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref networkAcl
+      RuleNumber: 100
+      Egress: true # outgoing
+      Protocol: -1 # according to this list https://en.wikipedia.org/wiki/List_of_IP_protocol_numbers
+      RuleAction: allow
+      CidrBlock: 0.0.0.0/0
+  
+  subnetBNetworkAclAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref subnetB
+      NetworkAclId: !Ref networkAcl
+  
+  subnetCNetworkAclAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref subnetC
+      NetworkAclId: !Ref networkAcl
   
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
@@ -142,11 +225,13 @@ Resources:
         - FromPort: 80 #HTTP
           ToPort: 80
           IpProtocol: tcp
-          CidrIp: 0.0.0.0/0
+          #CidrIp: 0.0.0.0/0
+          SourceSecurityGroupId: !Ref LBSecurityGroup
         - FromPort: 443 #HTTPS
           ToPort: 443
           IpProtocol: tcp
-          CidrIp: 0.0.0.0/0
+          #CidrIp: 0.0.0.0/0
+          SourceSecurityGroupId: !Ref LBSecurityGroup
         - FromPort: 9418 #gitlab
           ToPort: 9418
           IpProtocol: tcp
@@ -155,12 +240,31 @@ Resources:
         - Key: Name
           Value: !Sub "${AWS::StackName}-instanceSecurityGroup"
   
+  LBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupDescription: !Sub "${AWS::StackName}-SecurityGroup description"
+      GroupName: !Sub "${AWS::StackName}-LBSecurityGroup"
+      VpcId: !Ref EC2vpc
+      SecurityGroupIngress:
+        - FromPort: 80 #HTTP
+          ToPort: 80
+          IpProtocol: tcp
+          CidrIp: 0.0.0.0/0
+        - FromPort: 443 #HTTPS
+          ToPort: 443
+          IpProtocol: tcp
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-LBSecurityGroup"
+  
   demoKey:
     Type: 'AWS::EC2::KeyPair'
     Properties:
       KeyName: !Sub "${AWS::StackName}-keyPair"
       KeyType: rsa
-      #PublicKeyMaterial:
+      PublicKeyMaterial: ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDX72ggwdPvpc3gqoujwUErYA2+HKZrXSAplQCDf2u2nPsV1P3UHYCOUFENdCzluk2X770MAzRTKVz8jICq90gFecac76OfutgCYDME8AKt53uBqOmF/FszkmqCWqyI2J9AvGpuuJdEEx/pKGtMloUBTGl+Kl0eustR0FjrwLJH5HIcO1dl1YWgfSQMCypiqJoG8fgtjasddV1OHSsIthr4emUvgkJptmpyNbjaoLV7MWHKcBf5sSIKzk8ddZocz3+xNpmHtRe3v3P1kkMmo3zX9nA4bPMWUBBtp8jj5bcpJZRvljYIn/fUgCT6WpgsWwRbxO4XDlYJsV+umKja0c4r6V4DJGFdZ5JPDUTIq9gHiVdOCuVzpwKn1tsMU0GcHoLxOxF0BSAPH794GQ7h/2gqjQTsCYXW3uucm2/SDK3iJHAsNCawsTwptfMzafXd5Eyv0C22yAwvgSJ24X1j8xt4jLwct0chwaUGSGK+icJeC9e9/o7PU57MXtXFhZYVPkU= matth@DESKTOP-P0HSKC0
   
   placementGroup:
     Type: AWS::EC2::PlacementGroup
@@ -188,8 +292,8 @@ Resources:
         InstanceType: t2.medium
         CreditSpecification:
           CpuCredits: standard
-        DisableApiTermination: false
-        EbsOptimized: false
+        DisableApiTermination: false # true = cannot shutdown via console, api or cli - extra safeguards?
+        EbsOptimized: false # EBS I/O optimized
         InstanceInitiatedShutdownBehavior: stop # what to do when told to 'shutdown'
         Monitoring:
           Enabled: true
@@ -213,9 +317,9 @@ Resources:
         UserData:
           Fn::Base64: !Sub |
             #!/bin/bash
-  
+        
             sudo yum -y update
-  
+        
             curl https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm -o amazon-cloudwatch-agent.rpm
             sudo yum install -y ./amazon-cloudwatch-agent.rpm
             
@@ -230,7 +334,12 @@ Resources:
                     "collect_list": [
                       {
                         "file_path": "/var/log/messages",
-                        "log_group_name": "/aws/ec2/${AWS::StackName}-terminal",
+                        "log_group_name": "${instanceTerminalLogs}",
+                        "log_stream_name": "{instance_id}"
+                      },
+                      {
+                        "file_path": "/var/log/gitlab/nginx/gitlab_access.log",
+                        "log_group_name": "${instanceAccessLogs}",
                         "log_stream_name": "{instance_id}"
                       }
                     ]
@@ -243,22 +352,62 @@ Resources:
             sudo systemctl start amazon-cloudwatch-agent
             sudo systemctl enable amazon-cloudwatch-agent
             ########################################################################
-  
+            
             cd /
             sudo su
-  
+            
             # WITHOUT DOMAIN
-            # sudo curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.rpm.sh | sudo bash && sudo GITLAB_ROOT_PASSWORD="${gitlabRootPassword}" yum -y install gitlab-ce && sudo gitlab-ctl reconfigure
-  
+            # sudo curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.rpm.sh | sudo bash
+            # sudo GITLAB_ROOT_PASSWORD="${gitlabRootPassword}" yum install -y gitlab-ce
+            #             
+            # cd /etc/gitlab/
+            #             
+            # sudo tee gitlab.rb <<EOF
+            # gitlab_rails['backup_upload_connection'] = {
+            #   'provider' => 'AWS',
+            #   'region' => '${AWS::Region}',
+            #   'use_iam_profile' => true
+            #  }
+            # gitlab_rails['backup_upload_remote_directory'] = '${bucket}'
+            # gitlab_rails['backup_multipart_chunk_size'] = 104857600
+            # EOF
+            #             
+            # sudo gitlab-ctl reconfigure
+            
             # WITH DOMAIN
-            sudo curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.rpm.sh | sudo bash && sudo EXTERNAL_URL="https://${domainName}" GITLAB_ROOT_PASSWORD="${gitlabRootPassword}" yum -y install gitlab-ce && sudo gitlab-ctl reconfigure
+            sudo curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.rpm.sh | sudo bash
+            sudo EXTERNAL_URL="https://${domainName}" GITLAB_ROOT_PASSWORD="${gitlabRootPassword}" yum install -y gitlab-ce
+            
+            cd /etc/gitlab/
+            
+            sudo tee gitlab.rb <<EOF
+            external_url 'https://${domainName}'
+            letsencrypt['enable'] = false
+            gitlab_rails['backup_upload_connection'] = {
+              'provider' => 'AWS',
+              'region' => '${AWS::Region}',
+              'use_iam_profile' => true
+             }
+            gitlab_rails['backup_upload_remote_directory'] = '${bucket}'
+            gitlab_rails['backup_multipart_chunk_size'] = 104857600
+            EOF
+            
+            sudo gitlab-ctl reconfigure
+            
+            # sudo gitlab-rake gitlab:backup:create
     DependsOn:
       - instanceTerminalLogs
+      - instanceAccessLogs
   
-  instanceTerminalLogs: # === This log name is hardcoded into the ec2 template UserData FYI ===
+  instanceTerminalLogs:
     Type: AWS::Logs::LogGroup
     Properties:
       LogGroupName: !Join ['', [/aws/ec2/, !Sub "${AWS::StackName}-terminal"]]
+  
+  instanceAccessLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['', [/aws/ec2/, !Sub "${AWS::StackName}-access-log"]]
   
   loadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
@@ -268,7 +417,7 @@ Resources:
       Type: application
       Scheme: internet-facing
       SecurityGroups:
-        - !Ref instanceSecurityGroup # create own group with only http, https & git ports
+        - !Ref LBSecurityGroup
       Subnets: # 2 subnets needed
         - !Ref subnetC
         - !Ref subnetB
@@ -278,14 +427,14 @@ Resources:
     Properties:
       Port: 80
       Protocol: HTTP
-      DefaultActions: 
+      DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref HTTPtargetGroup
       LoadBalancerArn: !Ref loadBalancer
   
   HTTPtargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties: 
+    Properties:
       Name: !Sub "${AWS::StackName}-LB-HTTP-TG"
       TargetType: instance
       IpAddressType: ipv4
@@ -295,7 +444,7 @@ Resources:
       VpcId: !Ref EC2vpc
       HealthCheckEnabled: true
       HealthCheckProtocol: HTTP
-      HealthCheckPort: "80"
+      HealthCheckPort: "443"
       Targets:
         - Id: !Ref gitlabInstance
   
@@ -307,7 +456,7 @@ Resources:
     Properties:
       Port: 443
       Protocol: HTTPS
-      Certificates: # overrides Gitlab's self-signed cert
+      Certificates: # overrides Gitlab's self-signed cert-
         - CertificateArn: !Ref domainCertArn
       DefaultActions: 
         - Type: forward
@@ -330,9 +479,48 @@ Resources:
       Targets:
         - Id: !Ref gitlabInstance
   
+  backupInstanceEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: default
+      Name: !Sub "${AWS::StackName}-backup-eventRule"
+      ScheduleExpression: cron(00 00 * * ? *)
+      State: ENABLED
+      Targets:
+        - Id: Ide17be754-5857-463f-a18e-8114bd9284e1
+          Arn: !Join ['',[!Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:document/', !Ref preformGitlabBackupDoc]]
+          RoleArn: !GetAtt gitlabInstanceRole.Arn
+          RunCommandParameters:
+            RunCommandTargets:
+              - Key: InstanceIds
+                Values:
+                  - !Ref gitlabInstance
+  
+  preformGitlabBackup:
+    Type: "AWS::SSM::Document"
+    Properties:
+      Name: !Sub "${AWS::StackName}-preform-backup"
+      VersionName: "1.0.0"
+      TargetType: "/AWS::EC2::Instance"
+      DocumentType: "Command"
+      DocumentFormat: "JSON"
+      Content:
+        schemaVersion: "2.2"
+        description: "preform a backup"
+        mainSteps:
+        - action: "aws:runShellScript"
+          name: "backup"
+          inputs:
+            runCommand:
+              - "gitlab-rake gitlab:backup:create"
+              - !Sub "aws s3 cp /etc/gitlab/gitlab.rb s3://${bucket}"
+              - !Sub "aws s3 cp /etc/gitlab/gitlab-secrets.json s3://${bucket}"
+  
 Outputs:
   loadBalancerDNSname:
     Value: !GetAtt loadBalancer.DNSName
   # ROUTE 53 HOSTING CONFIG ############
   gitlabUrl:
     Value: !Sub "https://${domainName}"
+  S3Backups:
+    Value: !Ref bucket
