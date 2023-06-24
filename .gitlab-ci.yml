@@ -15,5 +15,7 @@ deploy:
    - echo $ROUTE_53_CERT
    - sam build
    - sam package --output-template-file packaged.yaml --s3-bucket $S3_DEPLOY_BUCKET --region $REGION
+   # with domain
+   - sam deploy --no-fail-on-empty-changeset --template-file packaged.yaml --stack-name $STACK_NAME --s3-bucket $S3_DEPLOY_BUCKET --capabilities CAPABILITY_NAMED_IAM --region $REGION --parameter-overrides domainName=$ROUTE_53_DOMAIN hostedZoneId=$ROUTE_53_DOMAIN_ID domainCertArn=$ROUTE_53_DOMAIN_CERT
+   # without domain
    #- sam deploy --no-fail-on-empty-changeset --template-file packaged.yaml --stack-name $STACK_NAME --s3-bucket $S3_DEPLOY_BUCKET --capabilities CAPABILITY_NAMED_IAM --region $REGION
-   - sam deploy --no-fail-on-empty-changeset --template-file packaged.yaml --stack-name $STACK_NAME --s3-bucket $S3_DEPLOY_BUCKET --capabilities CAPABILITY_NAMED_IAM --region $REGION --parameter-overrides domainName=$GITLAB_ROUTE_53_DOMAIN domainCertArn=$ROUTE_53_DOMAIN_CERT

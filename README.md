@@ -11,31 +11,23 @@
 
 ---
 
-# Setup with domain:
-1. prepare a domain / sub-domain e.g. 'gitlab.example.com'
-2. register a certificate that includes the prepared domain
-3. deploy the template with the given parameters.
-4. give about 10 mins for deployment and for gitlab CE to install & configure
-5. create a record in the 'example.com' hosted zone for 'gitlab.example.com' to route to the application load balancer.
-6. wait for record to propagate then visit 'gitlab.example.com'
+## Setup:
+1. deploy the template to cloudformation
+2. enter the parameters
+![](images/stack-parameters.png)
+3. configuration with a domain:
+   1. including the `hostedZoneId`, `domainName`, `subDomainName` & `domainCertArn` parameters will:
+      1. Create a HTTPS loadbalancer targetGroup & listener with the `domainCertArn` on port 443
+      2. Create a dns record in the `hostedZoneId` for `subDomainName.domainName` e.g. `gitlab.example.co.uk`
+      3. Configure the gitlab instance for the domain `subDomainName.domainName`
+   2. not including the `hostedZoneId`, `domainName`, `subDomainName` & `domainCertArn` parameters will:
+      1. Omit the HTTPS loadbalancer targetGroup & listener
+      2. Not create any dns records
+      3. Configure the gitlab instance to be accessible from the loadbalancer e.g. `{loadBalancerName}-1234567890.AWS::Region.elb.amazonaws.com`
+4. Give time for the instance to create, it will be accessible from the dns record or the public ELB domain
+
 ![](images/loginScreen.png)
-7. The default username is `root` & the script sets the password to `Password123!`
 
----
-
-# Setup without domain:
-1. All resources, parameters & outputs referring to `domain`, `HTTPS` & `port 443` can be removed. This includes:
-   1. Parameters
-      1. domainName
-      2. domainCertArn
-   2. Resources
-      1. HTTPSlistener
-      2. HTTPStargetGroup
-   3. Outputs
-      1. gitlabUrl
-2. remove the `'WITH DOMAIN'` part of the userData script (at the end) and uncomment the `WITHOUT DOMAIN` part of the script.
-
----
 
 # Notes
 Q: Why is a load balancer needed?
@@ -43,6 +35,8 @@ A: The Gitlab CE installation creates & signs its own HTTPS certificate which so
 
 Q: How do backups work?
 A: The gitlab.rb file is configured to send the `Gitlab backup`, the `gitlab.rb` file & `gitlab-secrets.json`. A backup will occur everyday at 00:00. A backup can also be preform by running the preform-backup SSM document.
+
+The default username is `root` & the userData script sets the password to `gitlabRootPassword` stack parameter, The default being `Password123!`
 
 ---
 

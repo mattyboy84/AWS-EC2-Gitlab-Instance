@@ -9,14 +9,31 @@ Parameters:
   gitlabRootPassword:
     Type: String
     Default: Password123!
-# ROUTE 53 HOSTING CONFIG ############
-  domainName:
+  hostedZoneId:
     Type: String
-    Description: name of domain registered in route 53.
+    Description: Id of the doamin hosted zone. - leave blank to omit
+    Default: ''
+  domainName: #example.co.uk
+    Type: String
+    Description: name of domain registered in route 53. e.g. example.com - leave blank to omit
+    Default: ''
+  subDomainName:
+    Type: String
+    Description: name of sub domain. - leave blank to omit
+    Default: gitlab
   domainCertArn:
     Type: String
-    Description: certificate of domain registered in route 53. must cover the given domain name/ sub domain name
-
+    Description: certificate of domain registered in route 53. must cover the given domain name/ sub domain name. - leave blank to omit
+    Default: ''
+  
+Conditions:
+  IsDomainConfiguredCondition:
+    !And
+      - !Not [!Equals [!Ref hostedZoneId, '']]
+      - !Not [!Equals [!Ref domainName, '']]
+      - !Not [!Equals [!Ref subDomainName, '']]
+      - !Not [!Equals [!Ref domainCertArn, '']]
+  
 Resources:
   gitlabInstanceRole: #This determines what can be done inside the EC2 instance
     Type: AWS::IAM::Role
@@ -51,11 +68,14 @@ Resources:
                   - "events:DescribeRule"
                   - "events:PutRule"
                 Resource: "*"
+              - Effect: Allow
+                Action: "cloudformation:DescribeStacks"
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/*"
       ManagedPolicyArns:
         - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
         - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
   
-  bucket:
+  backupBucket:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub "${AWS::StackName}-backups"
@@ -78,7 +98,6 @@ Resources:
       #  Rules:
       #    - Id: rule0
       #      Status: Enabled
-      #      #Prefix: /
       #      ExpirationInDays: 1
       #      NoncurrentVersionExpiration:
       #        NoncurrentDays: 1
@@ -355,42 +374,44 @@ Resources:
             
             cd /
             sudo su
-            
-            # WITHOUT DOMAIN
-            # sudo curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.rpm.sh | sudo bash
-            # sudo GITLAB_ROOT_PASSWORD="${gitlabRootPassword}" yum install -y gitlab-ce
-            #             
-            # cd /etc/gitlab/
-            #             
-            # sudo tee gitlab.rb <<EOF
-            # gitlab_rails['backup_upload_connection'] = {
-            #   'provider' => 'AWS',
-            #   'region' => '${AWS::Region}',
-            #   'use_iam_profile' => true
-            #  }
-            # gitlab_rails['backup_upload_remote_directory'] = '${bucket}'
-            # gitlab_rails['backup_multipart_chunk_size'] = 104857600
-            # EOF
-            #             
-            # sudo gitlab-ctl reconfigure
-            
-            # WITH DOMAIN
+
+            IS_DOMAIN_CONFIGURED=$(aws cloudformation --region ${AWS::Region} describe-stacks --stack-name ${AWS::StackName} --query "Stacks[0].Outputs[?OutputKey=='IsDomainConfigured'].OutputValue" --output text)
+            echo "IS_DOMAIN_CONFIGURED: $IS_DOMAIN_CONFIGURED"
+
+            if [[ $IS_DOMAIN_CONFIGURED == "true" ]]; then
+            #Domain configuration is enabled
             sudo curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.rpm.sh | sudo bash
-            sudo EXTERNAL_URL="https://${domainName}" GITLAB_ROOT_PASSWORD="${gitlabRootPassword}" yum install -y gitlab-ce
+            sudo EXTERNAL_URL="https://${subDomainName}.${domainName}" GITLAB_ROOT_PASSWORD="${gitlabRootPassword}" yum install -y gitlab-ce
             
             cd /etc/gitlab/
             
             sudo tee gitlab.rb <<EOF
-            external_url 'https://${domainName}'
+            external_url 'https://${subDomainName}.${domainName}'
             letsencrypt['enable'] = false
             gitlab_rails['backup_upload_connection'] = {
               'provider' => 'AWS',
               'region' => '${AWS::Region}',
               'use_iam_profile' => true
              }
-            gitlab_rails['backup_upload_remote_directory'] = '${bucket}'
+            gitlab_rails['backup_upload_remote_directory'] = '${backupBucket}'
             gitlab_rails['backup_multipart_chunk_size'] = 104857600
             EOF
+            else
+            # Domain configuration is not enabled
+            sudo curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.rpm.sh | sudo bash
+            sudo GITLAB_ROOT_PASSWORD="${gitlabRootPassword}" yum install -y gitlab-ce
+            cd /etc/gitlab/
+            sudo tee gitlab.rb <<EOF
+            gitlab_rails['backup_upload_connection'] = {
+              'provider' => 'AWS',
+              'region' => '${AWS::Region}',
+              'use_iam_profile' => true
+             }
+            gitlab_rails['backup_upload_remote_directory'] = '${backupBucket}'
+            gitlab_rails['backup_multipart_chunk_size'] = 104857600
+            EOF
+            sudo gitlab-ctl reconfigure
+            fi
             
             sudo gitlab-ctl reconfigure
             
@@ -448,11 +469,9 @@ Resources:
       Targets:
         - Id: !Ref gitlabInstance
   
-##########################
-  #ROUTE 53 HOSTING RESOURCES
-  
   HTTPSlistener:
     Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: IsDomainConfiguredCondition
     Properties:
       Port: 443
       Protocol: HTTPS
@@ -465,6 +484,7 @@ Resources:
   
   HTTPStargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: IsDomainConfiguredCondition
     Properties: 
       Name: !Sub "${AWS::StackName}-LB-HTTPS-TG"
       TargetType: instance
@@ -484,7 +504,7 @@ Resources:
     Properties:
       EventBusName: default
       Name: !Sub "${AWS::StackName}-backup-eventRule"
-      ScheduleExpression: cron(00 00 * * ? *)
+      ScheduleExpression: cron(00 00 * * ? *) #every day at midnight
       State: ENABLED
       Targets:
         - Id: Ide17be754-5857-463f-a18e-8114bd9284e1
@@ -496,7 +516,7 @@ Resources:
                 Values:
                   - !Ref gitlabInstance
   
-  preformGitlabBackup:
+  preformGitlabBackupDoc:
     Type: "AWS::SSM::Document"
     Properties:
       Name: !Sub "${AWS::StackName}-preform-backup"
@@ -513,14 +533,28 @@ Resources:
           inputs:
             runCommand:
               - "gitlab-rake gitlab:backup:create"
-              - !Sub "aws s3 cp /etc/gitlab/gitlab.rb s3://${bucket}"
-              - !Sub "aws s3 cp /etc/gitlab/gitlab-secrets.json s3://${bucket}"
+              - !Sub "aws s3 cp /etc/gitlab/gitlab.rb s3://${backupBucket}"
+              - !Sub "aws s3 cp /etc/gitlab/gitlab-secrets.json s3://${backupBucket}"
+  
+  gitlabRecord:
+    Type: AWS::Route53::RecordSet
+    Condition: IsDomainConfiguredCondition
+    Properties:
+      Name: !Sub "${subDomainName}.${domainName}"
+      HostedZoneId: !Ref hostedZoneId
+      Type: CNAME
+      ResourceRecords:
+        - !GetAtt loadBalancer.DNSName
+      TTL: 300
   
 Outputs:
   loadBalancerDNSname:
     Value: !GetAtt loadBalancer.DNSName
   # ROUTE 53 HOSTING CONFIG ############
   gitlabUrl:
-    Value: !Sub "https://${domainName}"
+    #Value: !Sub "https://${subDomainName}.${domainName}"
+    Value: !If [IsDomainConfiguredCondition, !Sub "https://${subDomainName}.${domainName}", !GetAtt loadBalancer.DNSName]
   S3Backups:
-    Value: !Ref bucket
+    Value: !Ref backupBucket
+  IsDomainConfigured:
+    Value: !If [IsDomainConfiguredCondition, true, false]
